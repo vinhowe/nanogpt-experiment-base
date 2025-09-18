@@ -227,8 +227,7 @@ def main(config: JobConfig) -> None:
         gptconf = Model(**checkpoint_model_args)
         model = GPT(gptconf)
         state_dict = checkpoint["model"]
-        # fix the keys of the state dictionary :(
-        # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+        # convert torch.compile state dict back to regular state dict
         unwanted_prefix = "_orig_mod."
         for k, v in list(state_dict.items()):
             if k.startswith(unwanted_prefix):
