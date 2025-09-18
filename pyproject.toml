@@ -1,0 +1,25 @@
+[project]
+name = "nanogpt-experiment-base"
+version = "0.1.0"
+description = "base for nanoGPT-style experiments"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["numpy>=2.3.3", "torch", "tyro>=0.9.31", "wandb>=0.21.4"]
+
+[tool.uv]
+package = true
+python-preference = "managed"
+
+[tool.setuptools.packages.find]
+include = ["src"]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/nightly/cu129"
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+
+[dependency-groups]
+dev = ["datasets>=4.0.0", "rich>=14.1.0", "ruff>=0.13.0", "tiktoken>=0.11.0"]
