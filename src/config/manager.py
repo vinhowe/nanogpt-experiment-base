@@ -49,6 +49,28 @@ class ConfigManager:
         self._validate_config()
         return self.config
 
+    def load_from_dict(self, data: dict[str, Any]) -> JobConfig:
+        """Load configuration directly from a Python dict (no CLI parsing).
+
+        This bypasses CLI parsing entirely. Only keys present in the dict are applied;
+        other fields fall back to dataclass defaults.
+        """
+        base_config = self._dict_to_dataclass(self.config_cls, data)
+        self.config = base_config
+        self._validate_config()
+        return self.config
+
+    def load_from_toml_file(self, file_path: str) -> JobConfig:
+        """Load configuration directly from a TOML file (no CLI parsing)."""
+        try:
+            with open(file_path, "rb") as f:
+                data = tomllib.load(f)
+        except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
+            print(f"Error while loading config file: {file_path}")
+            raise e
+
+        return self.load_from_dict(data)
+
     def _maybe_load_toml(self, args: list[str]) -> dict[str, Any] | None:
         """Load TOML config file if specified in CLI args."""
         # Check CLI for config file
