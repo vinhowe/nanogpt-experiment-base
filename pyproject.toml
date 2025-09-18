@@ -4,7 +4,13 @@ version = "0.1.0"
 description = "base for nanoGPT-style experiments"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["numpy>=2.3.3", "torch", "tyro>=0.9.31", "wandb>=0.21.4"]
+dependencies = [
+    "numpy>=2.3.3",
+    "tomli-w>=1.2.0",
+    "torch",
+    "tyro>=0.9.31",
+    "wandb>=0.21.4",
+]
 
 [tool.uv]
 package = true

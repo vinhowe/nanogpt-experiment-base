@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Data
+data/fineweb10B*
+
+# Training outputs
+out/

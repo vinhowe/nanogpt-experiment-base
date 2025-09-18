@@ -1,33 +1,6 @@
 from dataclasses import asdict, dataclass, field
 
 
-# Examples of classes that might be useful here
-# @dataclass(frozen=True)
-# class Job:
-#     ...
-# @dataclass(frozen=True)
-# class Training:
-#     ...
-# @dataclass(frozen=True)
-# class Model:
-#     ...
-# @dataclass(frozen=True)
-# class Optimizer:
-#     ...
-# @dataclass(frozen=True)
-# class LRScheduler:
-#     ...
-# @dataclass(frozen=True)
-# class Logging:
-#     ...
-# @dataclass(frozen=True)
-# class Checkpoint:
-#     ...
-# @dataclass(frozen=True)
-# class Distributed:
-#     ...
-
-
 @dataclass(frozen=True)
 class Job:
     """Top-level job options and metadata."""
@@ -51,6 +24,7 @@ class Model:
     block_size: int = 1024
     dropout: float = 0.0
     bias: bool = False
+    weight_tying: bool = True
     # vocab_size is derived from dataset meta by default
     vocab_size: int | None = None
 
@@ -63,7 +37,7 @@ class Init:
 
 @dataclass(frozen=True)
 class Optimizer:
-    learning_rate: float = 6e-4
+    learning_rate: float = 1e-4
     weight_decay: float = 1e-1
     beta1: float = 0.9
     beta2: float = 0.95
@@ -87,6 +61,7 @@ class Training:
     log_interval: int = 1
     eval_iters: int = 200
     eval_only: bool = False
+    seed: int = 1024
     always_save_checkpoint: bool = True
 
 
@@ -108,6 +83,8 @@ class Logging:
     wandb_log: bool = False
     wandb_project: str = "owt"
     wandb_run_name: str = "gpt2"
+    wandb_group: str | None = None
+    wandb_notes: str | None = None
     # Folders; manager will ensure they exist
     log_folder: str = "out"
     checkpoint_folder: str = "out"

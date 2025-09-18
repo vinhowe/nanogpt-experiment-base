@@ -18,50 +18,60 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
 
-import os
-import time
+import json
 import math
+import os
 import pickle
+import shutil
+import time
+import uuid
 from contextlib import nullcontext
 from dataclasses import asdict
 from typing import Any, Optional, cast
 
 import numpy as np
 import torch
+from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
 
-from src.model import GPTConfig, GPT
-from src.config.job_config import JobConfig
+from src.config.job_config import JobConfig, Model
 from src.config.manager import ConfigManager
+from src.experiment import cfg_hash, run_dir, write_meta
+from src.model import GPT
 
 
 def main(config: JobConfig) -> None:
     # -----------------------------------------------------------------------------
     # Unpack config into local variables (matches original script expectations)
-    # I/O
-    out_dir = config.logging.checkpoint_folder
+    # wandb logging
+    wandb_log = config.logging.wandb_log
+    wandb_project = config.logging.wandb_project
+    wandb_run_name = config.logging.wandb_run_name
+    wandb_group = config.logging.wandb_group
+    wandb_notes = config.logging.wandb_notes
+    # I/O: structured run directory
+    run_id = os.environ.get("RUN_ID", uuid.uuid4().hex[:8])
+    out_dir = run_dir(
+        config.logging.log_folder,
+        wandb_project,
+        wandb_group,
+        wandb_run_name,
+        config,
+        run_id,
+    )
     eval_interval = config.training.eval_interval
     log_interval = config.training.log_interval
     eval_iters = config.training.eval_iters
     eval_only = config.training.eval_only
     always_save_checkpoint = config.training.always_save_checkpoint
     init_from = config.init.init_from
-    # wandb logging
-    wandb_log = config.logging.wandb_log
-    wandb_project = config.logging.wandb_project
-    wandb_run_name = config.logging.wandb_run_name
     # data
     dataset = config.data.dataset
     gradient_accumulation_steps = config.training.gradient_accumulation_steps
     batch_size = config.training.batch_size
     block_size = config.model.block_size
     # model
-    n_layer = config.model.n_layer
-    n_head = config.model.n_head
-    n_embd = config.model.n_embd
     dropout = config.model.dropout
-    bias = config.model.bias
     # adamw optimizer
     learning_rate = config.optimizer.learning_rate
     max_iters = config.training.max_iters
@@ -117,8 +127,9 @@ def main(config: JobConfig) -> None:
     print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
     if master_process:
-        os.makedirs(out_dir, exist_ok=True)
-    torch.manual_seed(1337 + seed_offset)
+        os.makedirs(os.path.join(out_dir, "checkpoints"), exist_ok=True)
+        write_meta(out_dir, config)
+    torch.manual_seed(config.training.seed + seed_offset)
     torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
     torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
     device_type = (
@@ -199,14 +210,11 @@ def main(config: JobConfig) -> None:
             print(
                 "defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)"
             )
-        gptconf = GPTConfig(
-            n_layer=n_layer,
-            n_head=n_head,
-            n_embd=n_embd,
-            block_size=block_size,
-            bias=bias,
-            vocab_size=vocab,
-            dropout=dropout,
+        gptconf = Model(
+            **{
+                **asdict(config.model),
+                "vocab_size": vocab,
+            }
         )
         model = GPT(gptconf)
     elif init_from == "resume":
@@ -216,7 +224,7 @@ def main(config: JobConfig) -> None:
         checkpoint = cast(dict[str, Any], torch.load(ckpt_path, map_location=device))
         checkpoint_model_args: dict[str, Any] = checkpoint["model_args"]
         # create the model from checkpoint args
-        gptconf = GPTConfig(**checkpoint_model_args)
+        gptconf = Model(**checkpoint_model_args)
         model = GPT(gptconf)
         state_dict = checkpoint["model"]
         # fix the keys of the state dictionary :(
@@ -294,7 +302,14 @@ def main(config: JobConfig) -> None:
     if wandb_log and master_process:
         import wandb
 
-        wandb.init(project=wandb_project, name=wandb_run_name, config=asdict(config))
+        wandb.init(
+            project=wandb_project,
+            name=wandb_run_name,
+            group=wandb_group,
+            notes=wandb_notes,
+            config={"cfg_hash": cfg_hash(config), "run_id": run_id},
+            dir=out_dir,
+        )
 
     # training loop
     X, Y = get_batch("train")  # fetch the very first batch
@@ -312,34 +327,58 @@ def main(config: JobConfig) -> None:
 
         # evaluate the loss on train/val sets and write checkpoints
         if iter_num % eval_interval == 0 and master_process:
-            losses = estimate_loss()
-            print(
-                f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
-            )
-            if wandb_log and master_process:
-                import wandb
-
-                wandb.log(
-                    {
-                        "iter": iter_num,
-                        "train/loss": losses["train"],
-                        "val/loss": losses["val"],
-                        "lr": lr,
-                        "mfu": running_mfu * 100,  # convert to percentage
-                    }
+            losses = None
+            if eval_iters > 0:
+                losses = estimate_loss()
+                print(
+                    f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
                 )
-            if losses["val"] < best_val_loss or always_save_checkpoint:
-                best_val_loss = losses["val"]
+                if wandb_log and master_process:
+                    import wandb
+
+                    wandb.log(
+                        {
+                            "iter": iter_num,
+                            "train/loss": losses["train"],
+                            "val/loss": losses["val"],
+                            "lr": lr,
+                            "mfu": running_mfu * 100,  # convert to percentage
+                        }
+                    )
+            if (
+                losses is not None and losses["val"] < best_val_loss
+            ) or always_save_checkpoint:
+                if losses is not None:
+                    best_val_loss = losses["val"]
                 if iter_num > 0:
-                    checkpoint = {
-                        "model": raw_model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "model_args": asdict(raw_model.config),
-                        "iter_num": iter_num,
-                        "best_val_loss": best_val_loss,
-                        "config": asdict(config),
-                    }
-                    print(f"saving checkpoint to {out_dir}")
+                    ck_root = os.path.join(out_dir, "checkpoints")
+                    step_dir = os.path.join(ck_root, f"step-{iter_num:06d}")
+                    os.makedirs(step_dir, exist_ok=True)
+                    torch.save(
+                        raw_model.state_dict(), os.path.join(step_dir, "model.pt")
+                    )
+                    torch.save(
+                        optimizer.state_dict(), os.path.join(step_dir, "optimizer.pt")
+                    )
+                    with open(os.path.join(step_dir, "trainer_state.json"), "w") as f:
+                        json.dump(
+                            {
+                                "iter_num": iter_num,
+                                "best_val_loss": float(best_val_loss),
+                            },
+                            f,
+                        )
+                    latest = os.path.join(ck_root, "latest")
+                    try:
+                        if os.path.islink(latest) or os.path.exists(latest):
+                            if os.path.islink(latest):
+                                os.unlink(latest)
+                            else:
+                                shutil.rmtree(latest)
+                        os.symlink(os.path.basename(step_dir), latest)
+                    except Exception:
+                        pass
+                    print(f"saving checkpoint to {step_dir}")
                     torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
         if iter_num == 0 and eval_only:
             break

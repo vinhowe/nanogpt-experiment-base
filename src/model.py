@@ -7,14 +7,15 @@ https://github.com/openai/gpt-2/blob/master/src/model.py
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 """
 
-import math
 import inspect
-from dataclasses import dataclass
+import math
 from typing import cast
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+
+from src.config.job_config import Model
 
 
 class LayerNorm(nn.Module):
@@ -109,19 +110,8 @@ class Block(nn.Module):
         return x
 
 
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    dropout: float = 0.0
-    bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-
-
 class GPT(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: Model):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
@@ -137,13 +127,16 @@ class GPT(nn.Module):
             )
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        cast(
-            nn.Module, self.transformer.wte
-        ).weight = self.lm_head.weight  # https://paperswithcode.com/method/weight-tying
+        if config.weight_tying:
+            # with weight tying when using torch.compile() some warnings get generated:
+            # "UserWarning: functional_call was passed multiple values for tied weights.
+            # This behavior is deprecated and will be an error in future versions"
+            # not 100% sure what this is, so far seems to be harmless. TODO investigate
+            cast(
+                nn.Module, self.transformer.wte
+            ).weight = (
+                self.lm_head.weight
+            )  # https://paperswithcode.com/method/weight-tying
 
         # init all weights
         self.apply(self._init_weights)
@@ -155,7 +148,11 @@ class GPT(nn.Module):
                 )
 
         # report number of parameters
-        print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+        n_params = self.get_num_params()
+        if n_params < 1e6:
+            print("number of parameters: %.2fK" % (n_params / 1e3,))
+        else:
+            print("number of parameters: %.2fM" % (n_params / 1e6,))
 
     def get_num_params(self, non_embedding=True):
         """
@@ -217,7 +214,7 @@ class GPT(nn.Module):
         # e.g. we may load the GPT2 pretrained model checkpoint (block size 1024)
         # but want to use a smaller block size for some smaller, simpler model
         assert block_size <= self.config.block_size
-        self.config.block_size = block_size
+        self.config.block_size = block_size  # pyright: ignore[reportAttributeAccessIssue]
         cast(nn.Embedding, self.transformer.wpe).weight = nn.Parameter(
             cast(nn.Embedding, self.transformer.wpe).weight[:block_size]
         )
@@ -253,7 +250,7 @@ class GPT(nn.Module):
             print(f"overriding dropout rate to {override_args['dropout']}")
             config_args["dropout"] = override_args["dropout"]
         # create a from-scratch initialized minGPT model
-        config = GPTConfig(**config_args)  # pyright: ignore[reportArgumentType]
+        config = Model(**config_args)  # pyright: ignore[reportArgumentType]
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()

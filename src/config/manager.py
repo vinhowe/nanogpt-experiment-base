@@ -9,7 +9,7 @@ import tyro
 try:
     import tomllib  # pyright: ignore
 except ModuleNotFoundError:
-    import tomli as tomllib
+    import tomli as tomllib  # pyright: ignore
 
 from .job_config import JobConfig
 

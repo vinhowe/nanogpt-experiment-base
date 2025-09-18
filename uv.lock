@@ -409,6 +409,43 @@ wheels = [
 ]
 
 [[package]]
+name = "nanogpt-experiment-base"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "numpy" },
+    { name = "tomli-w" },
+    { name = "torch" },
+    { name = "tyro" },
+    { name = "wandb" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "datasets" },
+    { name = "rich" },
+    { name = "ruff" },
+    { name = "tiktoken" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=2.3.3" },
+    { name = "tomli-w", specifier = ">=1.2.0" },
+    { name = "torch" },
+    { name = "tyro", specifier = ">=0.9.31" },
+    { name = "wandb", specifier = ">=0.21.4" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "datasets", specifier = ">=4.0.0" },
+    { name = "rich", specifier = ">=14.1.0" },
+    { name = "ruff", specifier = ">=0.13.0" },
+    { name = "tiktoken", specifier = ">=0.11.0" },
+]
+
+[[package]]
 name = "networkx"
 version = "3.5"
 source = { registry = "https://download.pytorch.org/whl/nightly/cu129" }
@@ -1011,6 +1048,15 @@ wheels = [
 ]
 
 [[package]]
+name = "tomli-w"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/75/241269d1da26b624c0d5e110e8149093c759b7a286138f4efd61a60e75fe/tomli_w-1.2.0.tar.gz", hash = "sha256:2dd14fac5a47c27be9cd4c976af5a12d87fb1f0b4512f81d69cce3b35ae25021", size = 7184 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/18/c86eb8e0202e32dd3df50d43d7ff9854f8e0603945ff398974c1d91ac1ef/tomli_w-1.2.0-py3-none-any.whl", hash = "sha256:188306098d013b691fcadc011abd66727d3c414c571bb01b1a174ba8c983cf90", size = 6675 },
+]
+
+[[package]]
 name = "torch"
 version = "2.9.0.dev20250905+cu129"
 source = { registry = "https://download.pytorch.org/whl/nightly/cu129" }
@@ -1066,41 +1112,6 @@ dependencies = [
 ]
 wheels = [
     { url = "https://download.pytorch.org/whl/nightly/tqdm-4.67.1-py3-none-any.whl" },
-]
-
-[[package]]
-name = "translation-compression"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "numpy" },
-    { name = "torch" },
-    { name = "tyro" },
-    { name = "wandb" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "datasets" },
-    { name = "rich" },
-    { name = "ruff" },
-    { name = "tiktoken" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy", specifier = ">=2.3.3" },
-    { name = "torch" },
-    { name = "tyro", specifier = ">=0.9.31" },
-    { name = "wandb", specifier = ">=0.21.4" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "datasets", specifier = ">=4.0.0" },
-    { name = "rich", specifier = ">=14.1.0" },
-    { name = "ruff", specifier = ">=0.13.0" },
-    { name = "tiktoken", specifier = ">=0.11.0" },
 ]
 
 [[package]]
