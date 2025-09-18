@@ -307,7 +307,12 @@ def main(config: JobConfig) -> None:
             name=wandb_run_name,
             group=wandb_group,
             notes=wandb_notes,
-            config={"cfg_hash": cfg_hash(config), "run_id": run_id},
+            config={
+                "cfg_hash": cfg_hash(config),
+                "run_id": run_id,
+                "out_dir": out_dir,
+                **asdict(config),
+            },
             dir=out_dir,
         )
 
