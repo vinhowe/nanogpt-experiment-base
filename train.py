@@ -438,6 +438,18 @@ def main(config: JobConfig) -> None:
             print(
                 f"iter {iter_num}: loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%"
             )
+            if wandb_log and master_process:
+                import wandb
+
+                wandb.log(
+                    {
+                        "iter": iter_num,
+                        "train/loss": lossf,
+                        "lr": lr,
+                        "mfu": running_mfu * 100,
+                        "time_ms": dt * 1000,
+                    }
+                )
         iter_num += 1
         local_iter_num += 1
 
