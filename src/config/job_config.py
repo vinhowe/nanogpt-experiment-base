@@ -11,8 +11,8 @@ class Job:
 
 @dataclass(frozen=True)
 class Data:
-    dataset: str = "fineweb10B"
-    data_root: str = "data"  # Base folder containing dataset subfolders
+    train_bin: str = ""
+    val_bin: str | None = None
 
 
 @dataclass(frozen=True)

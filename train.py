@@ -21,10 +21,10 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 import json
 import math
 import os
-import pickle
 import shutil
 import time
 import uuid
+import glob
 from contextlib import nullcontext
 from dataclasses import asdict
 from typing import Any, Optional, cast
@@ -38,6 +38,99 @@ from src.config.job_config import JobConfig, Model
 from src.config.manager import ConfigManager
 from src.experiment import cfg_hash, run_dir, write_meta
 from src.model import GPT
+
+
+def print0(*args, **kwargs):
+    # modified print that only prints from the master process
+    # if this is not a distributed run, it's just a print
+    if int(os.environ.get("RANK", 0)) == 0:
+        print(*args, **kwargs)
+
+
+def _peek_data_shard(filename):
+    # only reads the header, returns header data
+    with open(filename, "rb") as f:
+        # first read the header, which is 256 int32 integers (4 bytes each)
+        header = np.frombuffer(f.read(256 * 4), dtype=np.int32)
+    if header[0] != 20240520:
+        print("ERROR: magic number mismatch in the data .bin file!")
+        print("---> HINT: Are you passing in a correct file with --input_bin?")
+        print(
+            "---> HINT: Dataset encoding changed recently, re-run data prepro or refer again to README"
+        )
+        exit(1)
+    assert header[1] == 1, "unsupported version"
+    ntok = header[2]  # number of tokens (claimed)
+    return ntok  # for now just return the number of tokens
+
+
+def _load_data_shard(filename):
+    with open(filename, "rb") as f:
+        # first read the header, which is 256 int32 integers (4 bytes each)
+        header = np.frombuffer(f.read(256 * 4), dtype=np.int32)
+        assert header[0] == 20240520, "magic number mismatch in the data .bin file"
+        assert header[1] == 1, "unsupported version"
+        ntok = header[2]  # number of tokens (claimed)
+        # the rest of it are tokens, stored as uint16
+        tokens = np.frombuffer(f.read(), dtype=np.uint16)
+    assert len(tokens) == ntok, "number of tokens read does not match header?"
+    return tokens
+
+
+class DistributedDataLoader:
+    def __init__(self, filename_pattern, B, T, process_rank, num_processes):
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        self.B = B
+        self.T = T
+
+        # glob files that match the pattern
+        self.files = sorted(glob.glob(filename_pattern))
+        assert len(self.files) > 0, (
+            f"did not find any files that match the pattern {filename_pattern}"
+        )
+
+        # load and validate all data shards, count number of tokens in total
+        ntok_total = 0
+        for fname in self.files:
+            shard_ntok = _peek_data_shard(fname)
+            assert shard_ntok >= num_processes * B * T + 1
+            ntok_total += shard_ntok
+        self.ntok_total = ntok_total
+        print0(
+            f"DataLoader: total number of tokens: {ntok_total:,} across {len(self.files)} files"
+        )
+
+        # kick things off
+        self.current_shard = None
+        self.reset()
+
+    def reset(self):
+        # we're being a bit clever here: if we already had shard 0 loaded,
+        # then don't do the work to reload it, just reset the pointer
+        if self.current_shard != 0:
+            self.current_shard = 0
+            self.tokens = _load_data_shard(self.files[self.current_shard])
+        self.current_position = self.process_rank * self.B * self.T
+
+    def advance(self):  # advance to next data shard
+        self.current_shard = (self.current_shard + 1) % len(self.files)  # pyright: ignore[reportOptionalOperand]
+        self.current_position = self.process_rank * self.B * self.T
+        self.tokens = _load_data_shard(self.files[self.current_shard])
+
+    def next_batch(self):
+        B = self.B
+        T = self.T
+        buf = self.tokens[self.current_position : self.current_position + B * T + 1]
+        buf = torch.tensor(buf.astype(np.int32), dtype=torch.long)
+        x = (buf[:-1]).view(B, T)  # inputs
+        y = (buf[1:]).view(B, T)  # targets
+        # advance the start pointer in current shard
+        self.current_position += B * T * self.num_processes
+        # if loading the next batch would be out of bounds advance the shard
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.advance()
+        return x, y
 
 
 def main(config: JobConfig) -> None:
@@ -66,7 +159,8 @@ def main(config: JobConfig) -> None:
     always_save_checkpoint = config.training.always_save_checkpoint
     init_from = config.init.init_from
     # data
-    dataset = config.data.dataset
+    train_bin = config.data.train_bin
+    val_bin = config.data.val_bin
     gradient_accumulation_steps = config.training.gradient_accumulation_steps
     batch_size = config.training.batch_size
     block_size = config.model.block_size
@@ -101,6 +195,7 @@ def main(config: JobConfig) -> None:
 
     # various inits, derived attributes, I/O setup
     ddp = int(os.environ.get("RANK", -1)) != -1  # is this a ddp run?
+    ddp_rank = None
     if ddp:
         init_process_group(backend=backend)
         ddp_rank = int(os.environ["RANK"])
@@ -147,52 +242,9 @@ def main(config: JobConfig) -> None:
         else torch.autocast(device_type=device_type, dtype=ptdtype)
     )
 
-    # poor man's data loader
-    data_dir = os.path.join(config.data.data_root, dataset)
-
-    def get_batch(split):
-        # We recreate np.memmap every batch to avoid a memory leak, as per
-        # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
-        if split == "train":
-            data = np.memmap(
-                os.path.join(data_dir, "train.bin"), dtype=np.uint16, mode="r"
-            )
-        else:
-            data = np.memmap(
-                os.path.join(data_dir, "val.bin"), dtype=np.uint16, mode="r"
-            )
-        ix = torch.randint(len(data) - block_size, (batch_size,))
-        x = torch.stack(
-            [torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix]
-        )
-        y = torch.stack(
-            [
-                torch.from_numpy((data[i + 1 : i + 1 + block_size]).astype(np.int64))
-                for i in ix
-            ]
-        )
-        if device_type == "cuda":
-            # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-            x, y = (
-                x.pin_memory().to(device, non_blocking=True),
-                y.pin_memory().to(device, non_blocking=True),
-            )
-        else:
-            x, y = x.to(device), y.to(device)
-        return x, y
-
     # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
     iter_num = 0
     best_val_loss = 1e9
-
-    # attempt to derive vocab_size from the dataset
-    meta_path = os.path.join(data_dir, "meta.pkl")
-    meta_vocab_size = None
-    if os.path.exists(meta_path):
-        with open(meta_path, "rb") as f:
-            meta = pickle.load(f)
-        meta_vocab_size = meta["vocab_size"]
-        print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
     # model init
     model: torch.nn.Module
@@ -201,12 +253,8 @@ def main(config: JobConfig) -> None:
         # init a new model from scratch
         print("Initializing a new model from scratch")
         # determine the vocab size we'll use for from-scratch training
-        vocab = (
-            config.model.vocab_size
-            if config.model.vocab_size is not None
-            else (meta_vocab_size if meta_vocab_size is not None else 50304)
-        )
-        if meta_vocab_size is None and config.model.vocab_size is None:
+        vocab = config.model.vocab_size
+        if vocab is None:
             print(
                 "defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)"
             )
@@ -267,15 +315,35 @@ def main(config: JobConfig) -> None:
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])  # pyright: ignore[reportPossiblyUnboundVariable]
 
+    train_loader = DistributedDataLoader(
+        train_bin,
+        batch_size,
+        block_size,
+        ddp_rank or 0,
+        ddp_world_size,
+    )
+    val_loader = None
+    if val_bin:
+        val_loader = DistributedDataLoader(
+            val_bin,
+            batch_size,
+            block_size,
+            ddp_rank or 0,
+            ddp_world_size,
+        )
+
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
     def estimate_loss():
+        if val_loader is None:
+            return None
         out = {}
         model.eval()
         for split in ["train", "val"]:
             losses = torch.zeros(eval_iters)
             for k in range(eval_iters):
-                X, Y = get_batch(split)
+                X, Y = val_loader.next_batch()
+                X, Y = X.to(device), Y.to(device)
                 with ctx:
                     logits, loss = model(X, Y)
                 losses[k] = loss.item()
@@ -316,7 +384,8 @@ def main(config: JobConfig) -> None:
         )
 
     # training loop
-    X, Y = get_batch("train")  # fetch the very first batch
+    X, Y = train_loader.next_batch()  # fetch the very first batch
+    X, Y = X.to(device), Y.to(device)
     t0 = time.time()
     local_iter_num = 0  # number of iterations in the lifetime of this process
     raw_model: GPT = (
@@ -332,8 +401,8 @@ def main(config: JobConfig) -> None:
         # evaluate the loss on train/val sets and write checkpoints
         if iter_num % eval_interval == 0 and master_process:
             losses = None
-            if eval_iters > 0:
-                losses = estimate_loss()
+            if eval_iters > 0 and val_loader is not None:
+                losses = cast(dict[str, torch.Tensor], estimate_loss())
                 print(
                     f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
                 )
@@ -406,7 +475,8 @@ def main(config: JobConfig) -> None:
                 )  # scale the loss to account for gradient accumulation
             last_loss = loss
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
-            X, Y = get_batch("train")
+            X, Y = train_loader.next_batch()
+            X, Y = X.to(device), Y.to(device)
             # backward pass, with gradient scaling if training in fp16
             scaler.scale(loss).backward()
         # clip the gradient
